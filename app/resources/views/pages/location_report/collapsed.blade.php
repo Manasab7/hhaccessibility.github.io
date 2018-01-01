@@ -27,7 +27,6 @@
 		  
     </script>
 	@endif
-	<script language="JavaScript" src="/js/jquery-3.1.1.js"></script>	
 	<script src="/js/location_report.js"></script>
 	<script language="JavaScript" src="/js/pie_graph.js"></script>
 @stop
