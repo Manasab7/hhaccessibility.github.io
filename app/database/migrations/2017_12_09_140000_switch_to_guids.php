@@ -85,6 +85,17 @@ class Test
 			$queryTable->update(['new_'.$fieldName => DB::raw("IF(".$fieldName." is null, null, concat('00000000-0000-0000-0000-', LPAD(".$fieldName.", 12, '0')))")]);
 		}
 	}
+	
+	public static function reverseConvertData(string $tableName)
+	{
+		echo 'reverseConvertData called for table: '.$tableName."\r\n";
+		$queryTable = DB::table($tableName);
+		$fieldNames = getAffectedFieldsForTable($tableName);
+		foreach ($fieldNames as $fieldName) {
+			$newFieldName = 'new_'.$fieldName;
+			$queryTable->update([$newFieldName => DB::raw("IF(".$fieldName." is null, null, CONVERT(SUBSTRING($fieldName,28),UNSIGNED INTEGER))")]);
+		}
+	}
 
 	public function addForeignKeyConstraints($tableName)
 	{
@@ -119,6 +130,27 @@ class Test
 		};
 	}
 
+	public function dropGuidFieldsAndRename($tableName)
+	{
+		$fieldNames = getAffectedFieldsForTable($tableName);
+		echo 'dropGuidFieldsAndRename called for table: '.$tableName."\r\n";
+        return function (Blueprint $table) use( &$fieldNames) {
+			foreach ($fieldNames as $fieldName) {
+				if( $fieldName === 'id' ) {
+					//$table->uuid($fieldName)->change();
+					$table->dropPrimary();
+				}
+				// drop the column.
+				$table->dropColumn($fieldName);
+				$table->renameColumn('new_'.$fieldName, $fieldName);
+				if( $fieldName === 'id' ) {
+					//$table->integer($fieldName)->change();
+					$table->primary(['id']);
+				}
+			}
+		};
+	}
+
     public function convertIdToGuidAndDropForeignConstraints($tableName)
     {
 		$fieldNames = getAffectedFieldsForTable($tableName);
@@ -134,7 +166,7 @@ class Test
 			}
 		};
     }
-	
+
 	public function addNewIntFields($tableName)
 	{
 		$fieldNames = getAffectedFieldsForTable($tableName);
@@ -149,8 +181,8 @@ class Test
 			foreach ($fieldNames as $fieldName) {
 				$newFieldNames []= 'new_' . $fieldName;
 			}
-			foreach ($newFieldNames as $fieldName) {
-				$newField = $table->integer($fieldName)->unsigned()->nullable();
+			foreach ($newFieldNames as $newFieldName) {
+				$table->integer($newFieldName)->unsigned()->nullable();
 			}
 		};
 	}
@@ -158,12 +190,15 @@ class Test
 	public function undoChange($tableName)
 	{
 		$fieldNames = getAffectedFieldsForTable($tableName);
+		echo "new_ fields dropped for ".$tableName."\r\n";
+		print_r($fieldNames);
 		$newFieldNames = [];
 		foreach ($fieldNames as $fieldName) {
 			$newFieldNames []= 'new_' . $fieldName;
 		}
         return function (Blueprint $table) use( &$newFieldNames) {
 			$table->dropColumn($newFieldNames);
+			
 		};
 	}
 }
@@ -171,58 +206,99 @@ class Test
 
 class SwitchToGuids extends Migration
 {
+	private function createConstraints($create_user_id_foreign_key = false)
+	{
+		Schema::table('user_role', function(Blueprint $table) {
+			$table->unique(array('role_id', 'user_id'));
+			$table->foreign('role_id')->references('id')->on('role');
+		});
+		Schema::table('user_question', function(Blueprint $table) {
+			$table->unique(array('question_id', 'user_id'));
+			$table->foreign('question_id')->references('id')->on('question');
+		});
+		if ($create_user_id_foreign_key) {
+			Schema::table('user_question', function(Blueprint $table) {
+				$table->foreign('user_id')->references('id')->on('user');
+			});
+		}
+	}
+
+	private function dropConstraints($drop_user_id_foreign_key = false)
+	{
+		Schema::table('user_role', function(Blueprint $table) {
+			$table->dropForeign('user_role_role_id_foreign');
+			$table->dropUnique('user_role_role_id_user_id_unique');
+		});
+		echo "Dropped the user_role unique constraint.\r\n";
+		Schema::table('user_question', function(Blueprint $table) {
+			$table->dropForeign('user_question_question_id_foreign');
+		});
+		if ($drop_user_id_foreign_key) {
+			Schema::table('user_question', function(Blueprint $table) {
+				$table->dropForeign('user_question_user_id_foreign');
+			});
+		}
+		echo "Dropped the user_question foreign key constraint to question_id.\r\n";
+		Schema::table('user_question', function(Blueprint $table) {
+			$table->dropUnique('user_question_question_id_user_id_unique');
+		});
+		echo "Dropped the user_question unique constraint.\r\n";
+	}
+	
     public function up()
     {
-		global $fieldsData;
-		foreach (getAffectedTableNames($fieldsData) as $tableName) {
+		foreach (getAffectedTableNames() as $tableName) {
 			$object = new Test();
 			$function = $object->convertIdToGuidAndDropForeignConstraints($tableName);
 			Schema::table($tableName, $function);
 			Test::convertData($tableName);
 		}
 		echo "Finished adding new_ fields to all tables and converting data to them.\r\n";
-		Schema::table('user_role', function(Blueprint $table) {
-			$table->dropForeign('user_role_role_id_foreign');
-			$table->dropUnique('user_role_role_id_user_id_unique');
-		});
-		echo "Dropped the user_role unique constraint.\r\n";
-		foreach (getAffectedTableNames($fieldsData) as $tableName) {
+		$this->dropConstraints();
+		foreach (getAffectedTableNames() as $tableName) {
 			Schema::table($tableName, $object->dropOriginalFieldsAndRename($tableName));
 		}
 		echo "Finished renaming all new_ fields to the original names.\r\n";
-		foreach (getAffectedTableNames($fieldsData) as $tableName) {
+		foreach (getAffectedTableNames() as $tableName) {
 			Schema::table($tableName, $object->addForeignKeyConstraints($tableName));
 		}
-		Schema::table('user_role', function(Blueprint $table) {
-			$table->unique(array('role_id', 'user_id'));
-			$table->foreign('role_id')->references('id')->on('role');
-		});
+		$this->createConstraints(false);
 		echo "All should be complete.\r\n";
     }
 
     public function down()
     {
-		Schema::table('user_role', function(Blueprint $table) {
-			$table->dropForeign('user_role_role_id_foreign');
-			$table->dropUnique('user_role_role_id_user_id_unique');
-		});
+		$this->dropConstraints(true);
 		foreach (getAffectedTableNames() as $tableName) {
 			$object = new Test;
 			$function = $object->addNewIntFields($tableName);
 			Schema::table($tableName, $function);
 		}
+
 		foreach (getPrimaryKeysToUpdate() as $tableName) {
 			deleteWhatCantBeConvertedToInt(DB::table($tableName), 'id');
 		}
+
+		foreach (getAffectedTableNames() as $tableName) {
+			Test::reverseConvertData($tableName);
+		}
+		foreach (getAffectedTableNames() as $tableName) {
+			$object = new Test;
+			$object->convertIdToGuidAndDropForeignConstraints($tableName);
+		}
 		
+		foreach (getAffectedTableNames() as $tableName) {
+			Schema::table($tableName, $object->dropGuidFieldsAndRename($tableName));
+		}
+
+		/*
+		echo "About to remove the guid fields and rename 'new_'";
 		foreach (getAffectedTableNames() as $tableName) {
 			$object = new Test;
 			$function = $object->undoChange($tableName);
 			Schema::table($tableName, $function);
 		}
-		Schema::table('user_role', function(Blueprint $table) {
-			$table->unique(array('role_id', 'user_id'));
-			$table->foreign('role_id')->references('id')->on('role');
-		});
+		echo "about to add constraints back";
+		$this->createConstraints(true);*/
     }
 }
